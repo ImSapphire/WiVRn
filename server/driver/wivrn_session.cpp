@@ -234,9 +234,8 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 	if (roles.gamepad >= 0)
 		roles.gamepad_profile = xdevs[roles.gamepad]->name;
 
-	if (auto system_name = get_info().system_name; !system_name.empty())
+	if (auto system_name = get_system_name(); !system_name.empty())
 	{
-		system_name += " on WiVRn";
 		strlcpy(xrt_system.base.properties.name, system_name.c_str(), std::size(xrt_system.base.properties.name));
 	}
 }

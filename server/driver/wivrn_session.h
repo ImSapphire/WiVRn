@@ -140,6 +140,14 @@ public:
 	{
 		return connection->info();
 	};
+	std::string get_system_name()
+	{
+		if (auto s = std::getenv("WIVRN_SYSTEM_NAME"))
+		{
+			return s;
+		}
+		return get_info().system_name + std::string(" on WiVRn");
+	}
 
 	void add_predict_offset(std::chrono::nanoseconds off)
 	{
