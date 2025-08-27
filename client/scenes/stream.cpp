@@ -386,6 +386,7 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 	        });
 
 	self->wifi = application::get_wifi_lock().get_wifi_lock();
+
 	return self;
 }
 
@@ -393,6 +394,13 @@ void scenes::stream::on_focused()
 {
 	gui_status_last_change = instance.now();
 
+	if (instance.has_extension(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME))
+	{
+		spdlog::info("Setting performance level to SUSTAINED_HIGH");
+		auto xrPerfSettingsSetPerformanceLevelEXT = instance.get_proc<PFN_xrPerfSettingsSetPerformanceLevelEXT>("xrPerfSettingsSetPerformanceLevelEXT");
+		xrPerfSettingsSetPerformanceLevelEXT(session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
+		xrPerfSettingsSetPerformanceLevelEXT(session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
+	}
 	auto views = system.view_configuration_views(viewconfig);
 	// stream_view = override_view(views[0], guess_model());
 	width = views[0].recommendedImageRectWidth;
@@ -499,6 +507,14 @@ void scenes::stream::on_unfocused()
 
 	imgui_ctx.reset();
 	swapchain_imgui = xr::swapchain();
+
+	if (instance.has_extension(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME))
+	{
+		spdlog::info("Setting performance level to SUSTAINED_LOW");
+		auto xrPerfSettingsSetPerformanceLevelEXT = instance.get_proc<PFN_xrPerfSettingsSetPerformanceLevelEXT>("xrPerfSettingsSetPerformanceLevelEXT");
+		xrPerfSettingsSetPerformanceLevelEXT(session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT);
+		xrPerfSettingsSetPerformanceLevelEXT(session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT);
+	}
 }
 
 scenes::stream::~stream()
