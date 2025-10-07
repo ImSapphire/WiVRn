@@ -1,0 +1,411 @@
+From 32da949b752e944828fb969afb65575d6c829137 Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Mon, 23 Sep 2024 03:36:30 +0200
+Subject: [PATCH 1/2] ipc: Add mechanism for blocking device inputs.
+
+---
+ src/xrt/ipc/server/ipc_server.h         |   6 +
+ src/xrt/ipc/server/ipc_server_handler.c | 289 +++++++++++++++++++++++-
+ src/xrt/ipc/shared/ipc_protocol.h       |  33 +++
+ src/xrt/ipc/shared/proto/50-system.json |   7 +
+ 4 files changed, 330 insertions(+), 5 deletions(-)
+
+diff --git a/src/xrt/ipc/server/ipc_server.h b/src/xrt/ipc/server/ipc_server.h
+index e68ad9aaf..5c7816f7a 100644
+--- a/src/xrt/ipc/server/ipc_server.h
++++ b/src/xrt/ipc/server/ipc_server.h
+@@ -169,6 +169,12 @@ struct ipc_client_state
+ 	int server_thread_index;
+ 
+ 	xrt_shmem_handle_t ism_handle;
++
++	//! Blocked inputs for all devices
++	struct ipc_block_input_state block_input;
++
++	//! Per-device blocked inputs
++	struct ipc_block_input_state block_input_device[XRT_SYSTEM_MAX_DEVICES];
+ };
+ 
+ enum ipc_thread_state
+diff --git a/src/xrt/ipc/server/ipc_server_handler.c b/src/xrt/ipc/server/ipc_server_handler.c
+index 31608969a..da3726272 100644
+--- a/src/xrt/ipc/server/ipc_server_handler.c
++++ b/src/xrt/ipc/server/ipc_server_handler.c
+@@ -1644,6 +1644,22 @@ ipc_handle_system_toggle_io_client(volatile struct ipc_client_state *_ics, uint3
+ 	return ipc_server_toggle_io_client(s, client_id);
+ }
+ 
++xrt_result_t
++ipc_handle_system_block_device_input(volatile struct ipc_client_state *ics,
++                                     uint32_t device_id,
++                                     const struct ipc_block_input_state *new_state)
++{
++	volatile struct ipc_block_input_state *ibis = &ics->block_input_device[device_id];
++
++	os_mutex_lock(&ics->server->global_state.lock);
++
++	memcpy((void *)ibis, new_state, sizeof(*ibis));
++
++	os_mutex_unlock(&ics->server->global_state.lock);
++
++	return XRT_SUCCESS;
++}
++
+ xrt_result_t
+ ipc_handle_swapchain_get_properties(volatile struct ipc_client_state *ics,
+                                     const struct xrt_swapchain_create_info *info,
+@@ -1917,6 +1933,248 @@ ipc_handle_compositor_semaphore_destroy(volatile struct ipc_client_state *ics, u
+  *
+  */
+ 
++static void
++accumulate_block_input_components(struct ipc_block_input_components *in, struct ipc_block_input_components *accum)
++{
++	if (in->all) {
++		accum->all = true;
++	}
++
++	if (in->non_pose) {
++		accum->non_pose = true;
++	}
++
++	if (in->click) {
++		accum->click = true;
++	}
++}
++
++static struct ipc_block_input_components
++gather_block_input_state(volatile struct ipc_client_state *ics, uint32_t device_id)
++{
++	struct ipc_server *s = ics->server;
++	struct ipc_block_input_components bic = {0};
++
++	os_mutex_lock(&s->global_state.lock);
++
++	for (uint32_t i = 0; i < IPC_MAX_CLIENTS; i++) {
++		volatile struct ipc_client_state *other_ics = &s->threads[i].ics;
++
++		if (other_ics->server_thread_index < 0) {
++			continue;
++		}
++
++		accumulate_block_input_components((void *)&other_ics->block_input.all, &bic);
++		accumulate_block_input_components((void *)&other_ics->block_input_device[device_id].all, &bic);
++
++		if (other_ics != ics) {
++			accumulate_block_input_components((void *)&other_ics->block_input.other_clients, &bic);
++			accumulate_block_input_components(
++			    (void *)&other_ics->block_input_device[device_id].other_clients, &bic);
++		}
++
++		if (!ics->client_state.session_overlay) {
++			accumulate_block_input_components((void *)&other_ics->block_input.main_app, &bic);
++			accumulate_block_input_components((void *)&other_ics->block_input_device[device_id].main_app,
++			                                  &bic);
++		}
++
++		if (bic.all) {
++			break;
++		}
++	}
++
++	os_mutex_unlock(&s->global_state.lock);
++
++	return bic;
++}
++
++static bool
++is_pose_input(struct xrt_input *xin)
++{
++	switch (XRT_GET_INPUT_TYPE(xin->name)) {
++	case XRT_INPUT_TYPE_VEC1_ZERO_TO_ONE:
++	case XRT_INPUT_TYPE_VEC1_MINUS_ONE_TO_ONE:
++	case XRT_INPUT_TYPE_VEC2_MINUS_ONE_TO_ONE:
++	case XRT_INPUT_TYPE_VEC3_MINUS_ONE_TO_ONE:
++	case XRT_INPUT_TYPE_BOOLEAN: break;
++	case XRT_INPUT_TYPE_POSE:
++	case XRT_INPUT_TYPE_HAND_TRACKING:
++	case XRT_INPUT_TYPE_FACE_TRACKING:
++	case XRT_INPUT_TYPE_BODY_TRACKING: return true;
++	}
++	return false;
++}
++
++static bool
++is_click_input(struct xrt_input *xin)
++{
++	switch (xin->name) {
++	case XRT_INPUT_SIMPLE_SELECT_CLICK:
++	case XRT_INPUT_SIMPLE_MENU_CLICK:
++	case XRT_INPUT_PSMV_PS_CLICK:
++	case XRT_INPUT_PSMV_MOVE_CLICK:
++	case XRT_INPUT_PSMV_START_CLICK:
++	case XRT_INPUT_PSMV_SELECT_CLICK:
++	case XRT_INPUT_PSMV_SQUARE_CLICK:
++	case XRT_INPUT_PSMV_CROSS_CLICK:
++	case XRT_INPUT_PSMV_CIRCLE_CLICK:
++	case XRT_INPUT_PSMV_TRIANGLE_CLICK:
++	case XRT_INPUT_HYDRA_1_CLICK:
++	case XRT_INPUT_HYDRA_2_CLICK:
++	case XRT_INPUT_HYDRA_3_CLICK:
++	case XRT_INPUT_HYDRA_4_CLICK:
++	case XRT_INPUT_HYDRA_MIDDLE_CLICK:
++	case XRT_INPUT_HYDRA_BUMPER_CLICK:
++	case XRT_INPUT_HYDRA_JOYSTICK_CLICK:
++	case XRT_INPUT_DAYDREAM_TOUCHPAD_CLICK:
++	case XRT_INPUT_DAYDREAM_BAR_CLICK:
++	case XRT_INPUT_DAYDREAM_CIRCLE_CLICK:
++	case XRT_INPUT_DAYDREAM_VOLUP_CLICK:
++	case XRT_INPUT_DAYDREAM_VOLDN_CLICK:
++	case XRT_INPUT_INDEX_SYSTEM_CLICK:
++	case XRT_INPUT_INDEX_A_CLICK:
++	case XRT_INPUT_INDEX_B_CLICK:
++	case XRT_INPUT_INDEX_TRIGGER_CLICK:
++	case XRT_INPUT_INDEX_THUMBSTICK_CLICK:
++	case XRT_INPUT_VIVE_SYSTEM_CLICK:
++	case XRT_INPUT_VIVE_SQUEEZE_CLICK:
++	case XRT_INPUT_VIVE_MENU_CLICK:
++	case XRT_INPUT_VIVE_TRIGGER_CLICK:
++	case XRT_INPUT_VIVE_TRACKPAD_CLICK:
++	case XRT_INPUT_VIVEPRO_SYSTEM_CLICK:
++	case XRT_INPUT_VIVEPRO_VOLUP_CLICK:
++	case XRT_INPUT_VIVEPRO_VOLDN_CLICK:
++	case XRT_INPUT_VIVEPRO_MUTE_MIC_CLICK:
++	case XRT_INPUT_WMR_MENU_CLICK:
++	case XRT_INPUT_WMR_SQUEEZE_CLICK:
++	case XRT_INPUT_WMR_THUMBSTICK_CLICK:
++	case XRT_INPUT_WMR_TRACKPAD_CLICK:
++	case XRT_INPUT_WMR_HOME_CLICK:
++	case XRT_INPUT_XBOX_MENU_CLICK:
++	case XRT_INPUT_XBOX_VIEW_CLICK:
++	case XRT_INPUT_XBOX_A_CLICK:
++	case XRT_INPUT_XBOX_B_CLICK:
++	case XRT_INPUT_XBOX_X_CLICK:
++	case XRT_INPUT_XBOX_Y_CLICK:
++	case XRT_INPUT_XBOX_DPAD_DOWN_CLICK:
++	case XRT_INPUT_XBOX_DPAD_RIGHT_CLICK:
++	case XRT_INPUT_XBOX_DPAD_UP_CLICK:
++	case XRT_INPUT_XBOX_DPAD_LEFT_CLICK:
++	case XRT_INPUT_XBOX_SHOULDER_LEFT_CLICK:
++	case XRT_INPUT_XBOX_SHOULDER_RIGHT_CLICK:
++	case XRT_INPUT_XBOX_THUMBSTICK_LEFT_CLICK:
++	case XRT_INPUT_XBOX_THUMBSTICK_RIGHT_CLICK:
++	case XRT_INPUT_GO_SYSTEM_CLICK:
++	case XRT_INPUT_GO_TRIGGER_CLICK:
++	case XRT_INPUT_GO_BACK_CLICK:
++	case XRT_INPUT_GO_TRACKPAD_CLICK:
++	case XRT_INPUT_TOUCH_X_CLICK:
++	case XRT_INPUT_TOUCH_Y_CLICK:
++	case XRT_INPUT_TOUCH_MENU_CLICK:
++	case XRT_INPUT_TOUCH_A_CLICK:
++	case XRT_INPUT_TOUCH_B_CLICK:
++	case XRT_INPUT_TOUCH_SYSTEM_CLICK:
++	case XRT_INPUT_TOUCH_THUMBSTICK_CLICK:
++	case XRT_INPUT_G2_CONTROLLER_X_CLICK:
++	case XRT_INPUT_G2_CONTROLLER_Y_CLICK:
++	case XRT_INPUT_G2_CONTROLLER_A_CLICK:
++	case XRT_INPUT_G2_CONTROLLER_B_CLICK:
++	case XRT_INPUT_G2_CONTROLLER_MENU_CLICK:
++	case XRT_INPUT_G2_CONTROLLER_THUMBSTICK_CLICK:
++	case XRT_INPUT_G2_CONTROLLER_HOME_CLICK:
++	case XRT_INPUT_G2_CONTROLLER_SQUEEZE_CLICK:
++	case XRT_INPUT_ODYSSEY_CONTROLLER_MENU_CLICK:
++	case XRT_INPUT_ODYSSEY_CONTROLLER_SQUEEZE_CLICK:
++	case XRT_INPUT_ODYSSEY_CONTROLLER_THUMBSTICK_CLICK:
++	case XRT_INPUT_ODYSSEY_CONTROLLER_TRACKPAD_CLICK:
++	case XRT_INPUT_ODYSSEY_CONTROLLER_HOME_CLICK:
++	case XRT_INPUT_ML2_CONTROLLER_MENU_CLICK:
++	case XRT_INPUT_ML2_CONTROLLER_SELECT_CLICK:
++	case XRT_INPUT_ML2_CONTROLLER_TRIGGER_CLICK:
++	case XRT_INPUT_ML2_CONTROLLER_TRACKPAD_CLICK:
++	case XRT_INPUT_ML2_CONTROLLER_SHOULDER_CLICK:
++	case XRT_INPUT_VIVE_TRACKER_SYSTEM_CLICK:
++	case XRT_INPUT_VIVE_TRACKER_MENU_CLICK:
++	case XRT_INPUT_VIVE_TRACKER_TRIGGER_CLICK:
++	case XRT_INPUT_VIVE_TRACKER_SQUEEZE_CLICK:
++	case XRT_INPUT_VIVE_TRACKER_TRACKPAD_CLICK:
++	case XRT_INPUT_PSSENSE_PS_CLICK:
++	case XRT_INPUT_PSSENSE_SHARE_CLICK:
++	case XRT_INPUT_PSSENSE_OPTIONS_CLICK:
++	case XRT_INPUT_PSSENSE_SQUARE_CLICK:
++	case XRT_INPUT_PSSENSE_TRIANGLE_CLICK:
++	case XRT_INPUT_PSSENSE_CROSS_CLICK:
++	case XRT_INPUT_PSSENSE_CIRCLE_CLICK:
++	case XRT_INPUT_PSSENSE_SQUEEZE_CLICK:
++	case XRT_INPUT_PSSENSE_TRIGGER_CLICK:
++	case XRT_INPUT_PSSENSE_THUMBSTICK_CLICK:
++	case XRT_INPUT_OPPO_MR_X_CLICK:
++	case XRT_INPUT_OPPO_MR_Y_CLICK:
++	case XRT_INPUT_OPPO_MR_MENU_CLICK:
++	case XRT_INPUT_OPPO_MR_A_CLICK:
++	case XRT_INPUT_OPPO_MR_B_CLICK:
++	case XRT_INPUT_OPPO_MR_HOME_CLICK:
++	case XRT_INPUT_OPPO_MR_THUMBSTICK_CLICK:
++	case XRT_INPUT_PICO_NEO3_X_CLICK:
++	case XRT_INPUT_PICO_NEO3_Y_CLICK:
++	case XRT_INPUT_PICO_NEO3_MENU_CLICK:
++	case XRT_INPUT_PICO_NEO3_SYSTEM_CLICK:
++	case XRT_INPUT_PICO_NEO3_TRIGGER_CLICK:
++	case XRT_INPUT_PICO_NEO3_THUMBSTICK_CLICK:
++	case XRT_INPUT_PICO_NEO3_SQUEEZE_CLICK:
++	case XRT_INPUT_PICO_NEO3_A_CLICK:
++	case XRT_INPUT_PICO_NEO3_B_CLICK:
++	case XRT_INPUT_PICO4_X_CLICK:
++	case XRT_INPUT_PICO4_Y_CLICK:
++	case XRT_INPUT_PICO4_SYSTEM_CLICK:
++	case XRT_INPUT_PICO4_TRIGGER_CLICK:
++	case XRT_INPUT_PICO4_THUMBSTICK_CLICK:
++	case XRT_INPUT_PICO4_SQUEEZE_CLICK:
++	case XRT_INPUT_PICO4_A_CLICK:
++	case XRT_INPUT_PICO4_B_CLICK:
++	case XRT_INPUT_PICO4_MENU_CLICK:
++	case XRT_INPUT_PICO_G3_MENU_CLICK:
++	case XRT_INPUT_PICO_G3_TRIGGER_CLICK:
++	case XRT_INPUT_PICO_G3_THUMBSTICK_CLICK:
++	case XRT_INPUT_VIVE_COSMOS_X_CLICK:
++	case XRT_INPUT_VIVE_COSMOS_Y_CLICK:
++	case XRT_INPUT_VIVE_COSMOS_MENU_CLICK:
++	case XRT_INPUT_VIVE_COSMOS_A_CLICK:
++	case XRT_INPUT_VIVE_COSMOS_B_CLICK:
++	case XRT_INPUT_VIVE_COSMOS_SYSTEM_CLICK:
++	case XRT_INPUT_VIVE_COSMOS_SHOULDER_CLICK:
++	case XRT_INPUT_VIVE_COSMOS_SQUEEZE_CLICK:
++	case XRT_INPUT_VIVE_COSMOS_TRIGGER_CLICK:
++	case XRT_INPUT_VIVE_COSMOS_THUMBSTICK_CLICK:
++	case XRT_INPUT_VIVE_FOCUS3_X_CLICK:
++	case XRT_INPUT_VIVE_FOCUS3_Y_CLICK:
++	case XRT_INPUT_VIVE_FOCUS3_MENU_CLICK:
++	case XRT_INPUT_VIVE_FOCUS3_A_CLICK:
++	case XRT_INPUT_VIVE_FOCUS3_B_CLICK:
++	case XRT_INPUT_VIVE_FOCUS3_SYSTEM_CLICK:
++	case XRT_INPUT_VIVE_FOCUS3_SQUEEZE_CLICK:
++	case XRT_INPUT_VIVE_FOCUS3_TRIGGER_CLICK:
++	case XRT_INPUT_VIVE_FOCUS3_THUMBSTICK_CLICK:
++	case XRT_INPUT_TOUCH_PRO_X_CLICK:
++	case XRT_INPUT_TOUCH_PRO_Y_CLICK:
++	case XRT_INPUT_TOUCH_PRO_MENU_CLICK:
++	case XRT_INPUT_TOUCH_PRO_A_CLICK:
++	case XRT_INPUT_TOUCH_PRO_B_CLICK:
++	case XRT_INPUT_TOUCH_PRO_SYSTEM_CLICK:
++	case XRT_INPUT_TOUCH_PRO_THUMBSTICK_CLICK:
++	case XRT_INPUT_TOUCH_PLUS_X_CLICK:
++	case XRT_INPUT_TOUCH_PLUS_Y_CLICK:
++	case XRT_INPUT_TOUCH_PLUS_MENU_CLICK:
++	case XRT_INPUT_TOUCH_PLUS_A_CLICK:
++	case XRT_INPUT_TOUCH_PLUS_B_CLICK:
++	case XRT_INPUT_TOUCH_PLUS_SYSTEM_CLICK:
++	case XRT_INPUT_TOUCH_PLUS_THUMBSTICK_CLICK: return true;
++	default: break;
++	}
++	return false;
++}
++
+ xrt_result_t
+ ipc_handle_device_update_input(volatile struct ipc_client_state *ics, uint32_t id)
+ {
+@@ -1940,14 +2198,35 @@ ipc_handle_device_update_input(volatile struct ipc_client_state *ics, uint32_t i
+ 	size_t size = sizeof(struct xrt_input) * isdev->input_count;
+ 
+ 	bool io_active = ics->io_active;
+-	if (io_active) {
++	struct ipc_block_input_components bic = gather_block_input_state(ics, device_id);
++
++	if (io_active && !bic.all && !bic.non_pose && !bic.click) {
+ 		memcpy(dst, src, size);
+-	} else {
+-		memset(dst, 0, size);
+ 
+-		for (uint32_t i = 0; i < isdev->input_count; i++) {
+-			dst[i].name = src[i].name;
++		// Reply.
++		return XRT_SUCCESS;
++	}
+ 
++	memset(dst, 0, size);
++
++	for (uint32_t i = 0; i < isdev->input_count; i++) {
++		bool block = false;
++
++		if (bic.all) {
++			block = true;
++		} else if (bic.non_pose) {
++			block = !is_pose_input(&src[i]);
++		} else if (bic.click) {
++			block = is_click_input(&src[i]);
++		}
++
++		if (io_active && !block) {
++			memcpy(&dst[i], &src[i], sizeof(dst[i]));
++		} else {
++			dst[i].name = src[i].name;
++			if (io_active) {
++				dst[i].active = src[i].active;
++			}
+ 			// Special case the rotation of the head.
+ 			if (dst[i].name == XRT_INPUT_GENERIC_HEAD_POSE) {
+ 				dst[i].active = src[i].active;
+diff --git a/src/xrt/ipc/shared/ipc_protocol.h b/src/xrt/ipc/shared/ipc_protocol.h
+index 4cdb4accf..c91cbcc54 100644
+--- a/src/xrt/ipc/shared/ipc_protocol.h
++++ b/src/xrt/ipc/shared/ipc_protocol.h
+@@ -324,6 +324,39 @@ struct ipc_app_state
+ };
+ 
+ 
++/*!
++ *
++ * @ingroup ipc
++ */
++struct ipc_block_input_components
++{
++	//! Blocking all inputs.
++	bool all;
++
++	//! Blocking non-pose inputs.
++	bool non_pose;
++
++	//! Blocking click inputs.
++	bool click;
++};
++
++/*!
++ * Which inputs are blocked for which kinds of clients.
++ *
++ * @ingroup ipc
++ */
++struct ipc_block_input_state
++{
++	//! Inputs to all clients.
++	struct ipc_block_input_components all;
++
++	//! Inputs to all clients other than this one.
++	struct ipc_block_input_components other_clients;
++
++	//! Inputs to the main application.
++	struct ipc_block_input_components main_app;
++};
++
+ /*!
+  * Arguments for creating swapchains from native images.
+  */
+diff --git a/src/xrt/ipc/shared/proto/50-system.json b/src/xrt/ipc/shared/proto/50-system.json
+index 72658ae8f..4dfd2fd7c 100644
+--- a/src/xrt/ipc/shared/proto/50-system.json
++++ b/src/xrt/ipc/shared/proto/50-system.json
+@@ -40,6 +40,13 @@
+ 		]
+ 	},
+ 
++	"system_block_device_input": {
++		"in": [
++			{"name": "id", "type": "uint32_t"},
++			{"name": "new_state", "type": "struct ipc_block_input_state"}
++		]
++	},
++
+ 	"system_devices_get_roles": {
+ 		"out": [
+ 			{"name": "system_roles", "type": "struct xrt_system_roles"}
+-- 
+2.52.0
+

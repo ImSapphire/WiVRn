@@ -1,0 +1,164 @@
+From cbba41387f92fd37a0d7fcc1c6646853e82b373f Mon Sep 17 00:00:00 2001
+From: Torge Matthies <openglfreak@googlemail.com>
+Date: Mon, 23 Sep 2024 03:36:30 +0200
+Subject: [PATCH 2/2] t/libmonado: Implement functions for blocking device
+ inputs.
+
+---
+ src/xrt/targets/libmonado/monado.c | 78 ++++++++++++++++++++++++++++++
+ src/xrt/targets/libmonado/monado.h | 46 ++++++++++++++++++
+ 2 files changed, 124 insertions(+)
+
+diff --git a/src/xrt/targets/libmonado/monado.c b/src/xrt/targets/libmonado/monado.c
+index 5a9335f32..c3fa68104 100644
+--- a/src/xrt/targets/libmonado/monado.c
++++ b/src/xrt/targets/libmonado/monado.c
+@@ -663,3 +663,81 @@ mnd_root_set_device_brightness(mnd_root_t *root, uint32_t device_index, float br
+ 	default: PE("Internal error, shouldn't get here"); return MND_ERROR_OPERATION_FAILED;
+ 	}
+ }
++
++mnd_result_t
++mnd_root_block_device_input(mnd_root_t *root, uint32_t device_index, const mnd_block_input_request_t *req)
++{
++	CHECK_NOT_NULL(root);
++	CHECK_NOT_NULL(req);
++
++	if (device_index >= root->ipc_c.ism->isdev_count) {
++		PE("Invalid device index (%u)", device_index);
++		return MND_ERROR_INVALID_VALUE;
++	}
++
++	struct ipc_block_input_state ipc_req = {
++		{ req->all, false, false },
++		{ req->other_clients, false, false },
++		{ req->main_app, false, false }
++	};
++
++	xrt_result_t r = ipc_call_system_block_device_input(&root->ipc_c, device_index, &ipc_req);
++	if (r != XRT_SUCCESS) {
++		PE("Failed to block input for device index: %u.\n", device_index);
++		return MND_ERROR_OPERATION_FAILED;
++	}
++
++	return MND_SUCCESS;
++}
++
++mnd_result_t
++mnd_root_block_device_non_pose_input(mnd_root_t *root, uint32_t device_index, const mnd_block_input_request_t *req)
++{
++	CHECK_NOT_NULL(root);
++	CHECK_NOT_NULL(req);
++
++	if (device_index >= root->ipc_c.ism->isdev_count) {
++		PE("Invalid device index (%u)", device_index);
++		return MND_ERROR_INVALID_VALUE;
++	}
++
++	struct ipc_block_input_state ipc_req = {
++		{ false, req->all, false },
++		{ false, req->other_clients, false },
++		{ false, req->main_app, false }
++	};
++
++	xrt_result_t r = ipc_call_system_block_device_input(&root->ipc_c, device_index, &ipc_req);
++	if (r != XRT_SUCCESS) {
++		PE("Failed to block non-pose input for device index: %u.\n", device_index);
++		return MND_ERROR_OPERATION_FAILED;
++	}
++
++	return MND_SUCCESS;
++}
++
++mnd_result_t
++mnd_root_block_device_click_input(mnd_root_t *root, uint32_t device_index, const mnd_block_input_request_t *req)
++{
++	CHECK_NOT_NULL(root);
++	CHECK_NOT_NULL(req);
++
++	if (device_index >= root->ipc_c.ism->isdev_count) {
++		PE("Invalid device index (%u)", device_index);
++		return MND_ERROR_INVALID_VALUE;
++	}
++
++	struct ipc_block_input_state ipc_req = {
++		{ false, false, req->all },
++		{ false, false, req->other_clients },
++		{ false, false, req->main_app }
++	};
++
++	xrt_result_t r = ipc_call_system_block_device_input(&root->ipc_c, device_index, &ipc_req);
++	if (r != XRT_SUCCESS) {
++		PE("Failed to block click input for device index: %u.\n", device_index);
++		return MND_ERROR_OPERATION_FAILED;
++	}
++
++	return MND_SUCCESS;
++}
+diff --git a/src/xrt/targets/libmonado/monado.h b/src/xrt/targets/libmonado/monado.h
+index 576073803..1c40db01f 100644
+--- a/src/xrt/targets/libmonado/monado.h
++++ b/src/xrt/targets/libmonado/monado.h
+@@ -116,6 +116,16 @@ typedef enum mnd_reference_space_type
+ 	MND_SPACE_REFERENCE_TYPE_UNBOUNDED,
+ } mnd_reference_space_type_t;
+ 
++typedef struct mnd_block_input_request
++{
++	//! Inputs to all clients.
++	bool all;
++	//! Inputs to all clients other than this one.
++	bool other_clients;
++	//! Inputs to the main application.
++	bool main_app;
++} mnd_block_input_request_t;
++
+ /*
+  *
+  * Functions
+@@ -526,6 +536,42 @@ mnd_root_get_device_brightness(mnd_root_t *root, uint32_t device_index, float *o
+ mnd_result_t
+ mnd_root_set_device_brightness(mnd_root_t *root, uint32_t device_index, float brightness, bool relative);
+ 
++/*!
++ * Block all input from a device.
++ *
++ * @param root         The libmonado state.
++ * @param device_index Index of device to block input from from.
++ * @param req          Pointer to struct describing which types of clients to block input to.
++ *
++ * @return MND_SUCCESS on success
++ */
++mnd_result_t
++mnd_root_block_device_input(mnd_root_t *root, uint32_t device_index, const mnd_block_input_request_t *req);
++
++/*!
++ * Block non-pose input from a device.
++ *
++ * @param root         The libmonado state.
++ * @param device_index Index of device to block input from from.
++ * @param req          Pointer to struct describing which types of clients to block input to.
++ *
++ * @return MND_SUCCESS on success
++ */
++mnd_result_t
++mnd_root_block_device_non_pose_input(mnd_root_t *root, uint32_t device_index, const mnd_block_input_request_t *req);
++
++/*!
++ * Block click input from a device.
++ *
++ * @param root         The libmonado state.
++ * @param device_index Index of device to block input from from.
++ * @param req          Pointer to struct describing which types of clients to block input to.
++ *
++ * @return MND_SUCCESS on success
++ */
++mnd_result_t
++mnd_root_block_device_click_input(mnd_root_t *root, uint32_t device_index, const mnd_block_input_request_t *req);
++
+ #ifdef __cplusplus
+ }
+ #endif
+-- 
+2.52.0
+
