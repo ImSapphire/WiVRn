@@ -1,0 +1,138 @@
+From 404073a6f0014c97aa968a1d314f02aefc20b624 Mon Sep 17 00:00:00 2001
+From: Sapphire <imsapphire0@gmail.com>
+Date: Fri, 14 Nov 2025 23:12:33 -0600
+Subject: [PATCH 8/8] d/solarxr: re-request settings continuously during
+ runtime
+
+Allows for hot-toggling of trackers.
+---
+ src/xrt/drivers/solarxr/solarxr_device.c | 99 ++++++++++++++++++++++++
+ 1 file changed, 99 insertions(+)
+
+diff --git a/src/xrt/drivers/solarxr/solarxr_device.c b/src/xrt/drivers/solarxr/solarxr_device.c
+index 58fdcb143..ea07dafb2 100644
+--- a/src/xrt/drivers/solarxr/solarxr_device.c
++++ b/src/xrt/drivers/solarxr/solarxr_device.c
+@@ -27,6 +27,7 @@ DEBUG_GET_ONCE_LOG_OPTION(solarxr_log, "SOLARXR_LOG", U_LOGGING_INFO)
+ DEBUG_GET_ONCE_BOOL_OPTION(solarxr_raw_trackers, "SOLARXR_RAW_TRACKERS", false)
+ DEBUG_GET_ONCE_NUM_OPTION(solarxr_startup_timeout_ms, "SOLARXR_STARTUP_TIMEOUT_MS", 4000)
+ DEBUG_GET_ONCE_NUM_OPTION(solarxr_sync_period_ms, "SOLARXR_SYNC_PERIOD_MS", 1)
++DEBUG_GET_ONCE_NUM_OPTION(solarxr_settings_sync_period_ms, "SOLARXR_SETTINGS_SYNC_PERIOD_MS", 5000)
+ 
+ struct solarxr_device;
+ struct solarxr_generic_tracker
+@@ -47,6 +48,7 @@ struct solarxr_device
+ 	struct solarxr_ipc_socket socket;
+ 	struct os_mutex mutex;
+ 	_Atomic(timepoint_ns) timestamp;
++	timepoint_ns last_settings_sync;
+ 	_Atomic(uint64_t) enabled_bones;
+ 	static_assert(SOLARXR_BODY_PART_MAX_ENUM <= 64, "bitfield too small");
+ 	struct solarxr_device_bone
+@@ -708,6 +710,103 @@ solarxr_network_thread(void *const ptr)
+ 			memcpy(device->bones, newBones, sizeof(device->bones));
+ 		}
+ 
++		const timepoint_ns time = os_monotonic_get_ns();
++		if (time - device->last_settings_sync >
++		    debug_get_num_option_solarxr_settings_sync_period_ms() * U_TIME_1MS_IN_NS) {
++			U_LOG_IFL_D(debug_get_log_option_solarxr_log(), "Requesting settings from server");
++			struct
++			{
++				uint8_t head[sizeof(struct solarxr_ipc_message)];
++				struct request_packet
++				{
++					uint32_t _root;
++					uint16_t _table_bundle[4];
++					struct
++					{ // table MessageBundle
++						int32_t _table;
++						uint32_t rpc_msgs; // vector*
++					} bundle;
++					struct
++					{ // vector<table RpcMessageHeader>
++						uint32_t length;
++						uint32_t values[1]; // table*
++					} rpc_msgs;
++					uint16_t _table_rpc_msgs_0[5];
++					struct
++					{ // table RpcMessageHeader
++						int32_t _table;
++						uint32_t message;     // table*
++						uint8_t message_type; // enum RpcMessage
++						uint8_t _pad[3];
++					} rpc_msgs_0;
++					uint16_t _table_request[2];
++					struct
++					{ // table SettingsRequest
++						int32_t _table;
++					} request;
++				} body;
++			} const request_packet = {
++			    .body = {._root = htole32(offsetof(struct request_packet, bundle)),
++			             ._table_bundle =
++			                 {
++			                     htole16(sizeof(request_packet.body._table_bundle)),
++			                     htole16(sizeof(request_packet.body.bundle)),
++			                     0,
++			                     htole16(offsetof(struct request_packet, bundle.rpc_msgs) -
++			                             offsetof(struct request_packet, bundle)),
++			                 },
++			             .bundle =
++			                 {
++			                     ._table = htole32(offsetof(struct request_packet, bundle) -
++			                                       offsetof(struct request_packet, _table_bundle)),
++			                     .rpc_msgs = htole32(offsetof(struct request_packet, rpc_msgs) -
++			                                         offsetof(struct request_packet, bundle.rpc_msgs)),
++			                 },
++			             .rpc_msgs =
++			                 {
++			                     .length = htole32(ARRAY_SIZE(request_packet.body.rpc_msgs.values)),
++			                     .values = {htole32(offsetof(struct request_packet, rpc_msgs_0) -
++			                                        offsetof(struct request_packet, rpc_msgs.values[0]))},
++			                 },
++			             ._table_rpc_msgs_0 =
++			                 {
++			                     htole16(sizeof(request_packet.body._table_rpc_msgs_0)),
++			                     htole16(sizeof(request_packet.body.rpc_msgs_0) -
++			                             sizeof(request_packet.body.rpc_msgs_0._pad)),
++			                     0,
++			                     htole16(offsetof(struct request_packet, rpc_msgs_0.message_type) -
++			                             offsetof(struct request_packet, rpc_msgs_0)),
++			                     htole16(offsetof(struct request_packet, rpc_msgs_0.message) -
++			                             offsetof(struct request_packet, rpc_msgs_0)),
++			                 },
++			             .rpc_msgs_0 =
++			                 {
++			                     ._table = htole32(offsetof(struct request_packet, rpc_msgs_0) -
++			                                       offsetof(struct request_packet, _table_rpc_msgs_0)),
++			                     .message = htole32(offsetof(struct request_packet, request) -
++			                                        offsetof(struct request_packet, rpc_msgs_0.message)),
++			                     .message_type = SOLARXR_RPC_MESSAGE_TYPE_SETTINGS_REQUEST,
++			                 },
++			             ._table_request =
++			                 {
++			                     htole16(sizeof(request_packet.body._table_request)),
++			                     htole16(sizeof(request_packet.body.request)),
++			                 },
++			             .request =
++			                 {
++			                     ._table = htole32(offsetof(struct request_packet, request) -
++			                                       offsetof(struct request_packet, _table_request)),
++			                 }},
++			};
++
++			if (!solarxr_ipc_socket_send_raw(
++			        &device->socket, (const uint8_t *)&request_packet,
++			        solarxr_ipc_message_inline((uint8_t *)&request_packet, sizeof(request_packet)))) {
++				U_LOG_IFL_E(debug_get_log_option_solarxr_log(), "solarxr_ipc_socket_send_raw() failed");
++			}
++			device->last_settings_sync = time;
++		}
++
+ 		os_mutex_unlock(&device->mutex);
+ 	}
+ 
+-- 
+2.52.0
+

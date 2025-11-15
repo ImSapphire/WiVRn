@@ -62,6 +62,7 @@ wivrn_android_face_tracker::wivrn_android_face_tracker(xrt_device * hmd,
         },
         cnx(cnx)
 {
+	xrt_device_init(this);
 }
 
 xrt_result_t wivrn_android_face_tracker::update_inputs()
