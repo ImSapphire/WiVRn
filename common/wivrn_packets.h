@@ -250,6 +250,7 @@ struct headset_info_packet
 	bool user_presence;
 	bool passthrough;
 	face_type face_tracking;
+	XrFaceTrackingDataSource2FB face_data_source_fb2;
 	uint32_t num_generic_trackers;
 	std::vector<video_codec> supported_codecs; // from preferred to least preferred
 	std::optional<uint8_t> bit_depth;
@@ -324,6 +325,7 @@ struct tracking
 		std::array<float, XR_FACE_CONFIDENCE2_COUNT_FB> confidences;
 		bool is_valid;
 		bool is_eye_following_blendshapes_valid;
+		XrFaceTrackingDataSource2FB data_source;
 		XrTime time;
 	};
 

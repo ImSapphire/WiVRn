@@ -56,7 +56,7 @@ wivrn_fb_face2_tracker::wivrn_fb_face2_tracker(xrt_device * hmd,
         },
         face_input{
                 .active = true,
-                .name = XRT_INPUT_FB_FACE_TRACKING2_VISUAL,
+                .name = cnx.get_info().face_data_source_fb2 == XR_FACE_TRACKING_DATA_SOURCE2_VISUAL_FB ? XRT_INPUT_FB_FACE_TRACKING2_VISUAL : XRT_INPUT_FB_FACE_TRACKING2_AUDIO,
         },
         cnx(cnx)
 {
@@ -78,6 +78,7 @@ void wivrn_fb_face2_tracker::update_tracking(const from_headset::tracking & trac
 	        .confidences = face->confidences,
 	        .is_valid = face->is_valid,
 	        .is_eye_following_blendshapes_valid = face->is_eye_following_blendshapes_valid,
+	        .data_source = (xrt_face_tracking_data_source2_fb)face->data_source,
 	        .time = offset.from_headset(face->time),
 	};
 
@@ -87,7 +88,7 @@ void wivrn_fb_face2_tracker::update_tracking(const from_headset::tracking & trac
 
 xrt_result_t wivrn_fb_face2_tracker::get_face_tracking(enum xrt_input_name facial_expression_type, int64_t at_timestamp_ns, struct xrt_facial_expression_set * inout_value)
 {
-	if (facial_expression_type == XRT_INPUT_FB_FACE_TRACKING2_VISUAL)
+	if (facial_expression_type == XRT_INPUT_FB_FACE_TRACKING2_VISUAL or facial_expression_type == XRT_INPUT_FB_FACE_TRACKING2_AUDIO)
 	{
 		cnx.set_enabled(to_headset::tracking_control::id::face, true);
 		auto [_, data] = face_list.get_at(at_timestamp_ns);
@@ -99,11 +100,10 @@ xrt_result_t wivrn_fb_face2_tracker::get_face_tracking(enum xrt_input_name facia
 			return XRT_SUCCESS;
 
 		inout_value->face_expression_set2_fb.is_eye_following_blendshapes_valid = data.is_eye_following_blendshapes_valid;
+		inout_value->face_expression_set2_fb.data_source = data.data_source;
 
 		std::ranges::copy(data.weights, inout_value->face_expression_set2_fb.weights);
 		std::ranges::copy(data.confidences, inout_value->face_expression_set2_fb.confidences);
-
-		inout_value->face_expression_set2_fb.data_source = XRT_FACE_TRACKING_DATA_SOURCE2_VISUAL_FB;
 
 		return XRT_SUCCESS;
 	}

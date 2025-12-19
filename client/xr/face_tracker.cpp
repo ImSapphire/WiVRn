@@ -34,7 +34,7 @@ xr::face_tracker_type xr::face_tracker_supported(xr::instance & instance, xr::sy
 	if (instance.has_extension(XR_FB_FACE_TRACKING2_EXTENSION_NAME))
 	{
 		auto properties = system.fb_face_tracking2_properties();
-		if (properties.supportsVisualFaceTracking)
+		if (properties.supportsVisualFaceTracking or properties.supportsAudioFaceTracking)
 			return xr::face_tracker_type::fb;
 	}
 
@@ -74,8 +74,13 @@ xr::face_tracker xr::make_face_tracker(xr::instance & instance, xr::system & sys
 	if (instance.has_extension(XR_FB_FACE_TRACKING2_EXTENSION_NAME))
 	{
 		auto properties = system.fb_face_tracking2_properties();
-		if (properties.supportsVisualFaceTracking)
-			return xr::face_tracker(std::in_place_type_t<xr::fb_face_tracker2>(), instance, session);
+		if (properties.supportsVisualFaceTracking or properties.supportsAudioFaceTracking)
+			return xr::face_tracker(
+			        std::in_place_type_t<xr::fb_face_tracker2>(),
+			        instance,
+			        session,
+			        properties.supportsVisualFaceTracking,
+			        properties.supportsAudioFaceTracking);
 	}
 
 	if (instance.has_extension(XR_HTC_FACIAL_TRACKING_EXTENSION_NAME))

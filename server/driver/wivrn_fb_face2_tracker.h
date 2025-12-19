@@ -48,6 +48,8 @@ struct wivrn_fb_face2_data
 	// would be too old to be considered for interpolation
 	bool is_eye_following_blendshapes_valid;
 
+	xrt_face_tracking_data_source2_fb data_source;
+
 	int64_t time;
 };
 

@@ -272,6 +272,9 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 				case xr::face_tracker_type::fb:
 				case xr::face_tracker_type::pico:
 					info.face_tracking = from_headset::face_type::fb2;
+					info.face_data_source_fb2 = self->system.fb_face_tracking2_properties().supportsVisualFaceTracking
+					                                    ? XR_FACE_TRACKING_DATA_SOURCE2_VISUAL_FB
+					                                    : XR_FACE_TRACKING_DATA_SOURCE2_AUDIO_FB;
 					break;
 				case xr::face_tracker_type::htc:
 					info.face_tracking = from_headset::face_type::htc;

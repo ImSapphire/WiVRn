@@ -23,22 +23,27 @@
 #include <cstdint>
 #include <openxr/openxr.h>
 
-xr::fb_face_tracker2::fb_face_tracker2(instance & inst, session & s) :
+xr::fb_face_tracker2::fb_face_tracker2(instance & inst, session & s, bool visual, bool audio) :
         handle(inst.get_proc<PFN_xrDestroyFaceTracker2FB>("xrDestroyFaceTracker2FB"))
 {
 	auto xrCreateFaceTracker2FB = inst.get_proc<PFN_xrCreateFaceTracker2FB>("xrCreateFaceTracker2FB");
 	xrGetFaceExpressionWeights2FB = inst.get_proc<PFN_xrGetFaceExpressionWeights2FB>("xrGetFaceExpressionWeights2FB");
 	assert(xrCreateFaceTracker2FB);
 
-	XrFaceTrackingDataSource2FB data_sources[1];
-	data_sources[0] = XR_FACE_TRACKING_DATA_SOURCE2_VISUAL_FB;
+	std::vector<XrFaceTrackingDataSource2FB> data_sources{};
+	if (visual)
+		data_sources.push_back(XR_FACE_TRACKING_DATA_SOURCE2_VISUAL_FB);
+	if (audio)
+		data_sources.push_back(XR_FACE_TRACKING_DATA_SOURCE2_AUDIO_FB);
+
+	assert(data_sources.size() > 0);
 
 	XrFaceTrackerCreateInfo2FB create_info{
 	        .type = XR_TYPE_FACE_TRACKER_CREATE_INFO2_FB,
 	        .next = nullptr,
 	        .faceExpressionSet = XR_FACE_EXPRESSION_SET2_DEFAULT_FB,
-	        .requestedDataSourceCount = 1,
-	        .requestedDataSources = data_sources,
+	        .requestedDataSourceCount = (uint32_t)data_sources.size(),
+	        .requestedDataSources = data_sources.data(),
 	};
 
 	CHECK_XR(xrCreateFaceTracker2FB(s, &create_info, &id));
@@ -68,6 +73,7 @@ void xr::fb_face_tracker2::get_weights(XrTime time, wivrn::from_headset::trackin
 	{
 		out_expressions.is_valid = expression_weights.isValid;
 		out_expressions.is_eye_following_blendshapes_valid = expression_weights.isEyeFollowingBlendshapesValid;
+		out_expressions.data_source = expression_weights.dataSource;
 		out_expressions.time = expression_weights.time;
 	}
 	else

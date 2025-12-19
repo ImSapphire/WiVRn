@@ -33,7 +33,7 @@ class fb_face_tracker2 : public utils::handle<XrFaceTracker2FB>
 
 public:
 	using packet_type = wivrn::from_headset::tracking::fb_face2;
-	fb_face_tracker2(instance & inst, session & s);
+	fb_face_tracker2(instance & inst, session & s, bool visual, bool audio);
 
 	void get_weights(XrTime time, packet_type & out_expressions);
 };
